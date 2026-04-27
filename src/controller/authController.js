@@ -124,41 +124,20 @@ export const verifyOtp = async (req, res, next) => {
 
     const { userId, otp } = parsedData.data;
 
-    // Sanitize inputs
+    // Sanitize and validate inputs
     const sanitizedUserId = sanitizeAndValidateId(userId, 'User ID');
-    const sanitizedOtp = sanitizeInput(otp);
+    const sanitizedOtp = sanitizeInput(otp); // OTP is numeric, basic sanitization
 
-    // 🔍 DEBUG LOGS
-    console.log("👉 Entered OTP:", sanitizedOtp);
-    console.log("👉 Static OTP (.env):", process.env.STATIC_OTP);
-
-    // Find user
+    // Find user by ID
     const user = await UserModel.findById(sanitizedUserId).select("+otp +otpExpires");
 
     if (!user) throw createHttpError(404, "User not found");
     if (user.isVerified) throw createHttpError(400, "User already verified");
 
-    const isStaticOTP = process.env.STATIC_OTP;
-
-    // ✅ OTP validation
-    if (isStaticOTP) {
-      console.log("✅ Static OTP mode ON");
-
-      if (String(sanitizedOtp) !== String(isStaticOTP)) {
-        throw createHttpError(400, "Invalid OTP");
-      }
-    } else {
-      console.log("📦 DB OTP mode");
-
-      console.log("👉 DB OTP:", user.otp);
-
-      if (String(user.otp) !== String(sanitizedOtp)) {
-        throw createHttpError(400, "Invalid OTP");
-      }
-
-      if (user.otpExpires < new Date()) {
-        throw createHttpError(400, "OTP has expired");
-      }
+    // Check OTP validity
+    if (user.otp !== sanitizedOtp) throw createHttpError(400, "Invalid OTP");
+    if (user.otpExpires < new Date()) {
+      throw createHttpError(400, "OTP has expired");
     }
 
     // Generate tokens
@@ -168,12 +147,13 @@ export const verifyOtp = async (req, res, next) => {
       user.role
     );
 
-    // Update user
+    // Update user document
     user.isVerified = true;
     user.otp = undefined;
     user.otpExpires = undefined;
     user.lastLogin = new Date();
 
+    // Store ONLY the hashed refresh token (security best practice)
     const hashedRefreshToken = crypto
       .createHash("sha256")
       .update(refreshToken)
@@ -185,7 +165,7 @@ export const verifyOtp = async (req, res, next) => {
 
     user.refreshTokens.push({
       token: hashedRefreshToken,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
     });
 
     await user.save();
@@ -199,12 +179,10 @@ export const verifyOtp = async (req, res, next) => {
         username: user.username,
         role: user.role,
         accessToken,
-        refreshToken,
+        refreshToken, // Send plain token to client
       },
     });
-
   } catch (error) {
-    console.error("❌ Verify OTP Error:", error);
     next(error);
   }
 };
@@ -306,33 +284,14 @@ export const loginUser = async (req, res, next) => {
     await user.save();
 
     // Send OTP email
-    // await sendOTPEmail(user.email, user.username, otp, 10);
-  // ✅ Email Logic (SAFE)
-    if (!process.env.STATIC_OTP) {
-      try {
-        console.log("📧 Sending email...");
-        await sendOTPEmail(user.email, user.username, otp, 10);
-      } catch (emailError) {
-        console.error("❌ Email failed:", emailError.message);
-        // Do NOT crash API
-      }
-    } else {
-      console.log("✅ Skipping email, STATIC OTP:", otp);
-    }
+    await sendOTPEmail(user.email, user.username, otp, 10);
 
-    // ✅ Response
     return res.status(200).json({
       success: true,
-      message: process.env.STATIC_OTP
-        ? `Static OTP enabled. Use ${process.env.STATIC_OTP} to login.`
-        : "OTP sent to your email. Please verify to complete login.",
-      data: {
-        userId: user._id,
-      },
+      message: "OTP sent to your email. Please verify to complete login.",
+      data: { userId: user._id },
     });
-
   } catch (error) {
-    console.error("❌ Login Error:", error);
     next(error);
   }
 };
